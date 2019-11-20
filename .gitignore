@@ -4,3 +4,8 @@ tensorboard*/
 slurm-*.out
 *.pyc
 *.swp
+data/multiwoz/original/*
+data/multiwoz2.1/original/*
+.idea
+results/
+data

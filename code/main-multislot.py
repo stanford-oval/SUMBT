@@ -3,12 +3,11 @@ import os
 import logging
 import argparse
 import random
+import pdb
 import collections
 from tqdm import tqdm, trange
 import json
-
 import pdb
-
 import numpy as np
 import torch
 from torch.utils.data import TensorDataset, DataLoader, RandomSampler, SequentialSampler
@@ -24,6 +23,8 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+
+# noinspection PyInterpreter
 class InputExample(object):
     """A single training/test example for simple sequence classification."""
 
@@ -87,6 +88,8 @@ class Processor(DataProcessor):
     def __init__(self, config):
         super(Processor, self).__init__()
 
+        config.target_slot_word == config.target_slot
+        config.slot_idx = {}
         # WOZ2.0 dataset
         if config.data_dir == "data/woz" or config.data_dir=="data/woz-turn":
             fp_ontology = open(os.path.join(config.data_dir, "ontology_dstc2_en.json"), "r")
@@ -104,6 +107,7 @@ class Processor(DataProcessor):
             ontology = json.load(fp_ontology)
             for slot in ontology.keys():
                 ontology[slot].append("none")
+                ontology[slot].append("do not care")
             fp_ontology.close()
 
             if not config.target_slot == 'all':
@@ -113,7 +117,32 @@ class Processor(DataProcessor):
                 for key, value in slot_idx.items():
                     if key != config.target_slot:
                         target_slot.append(value)
+                        config.slot_idx.update({key: value})
                 config.target_slot = ':'.join(target_slot)
+
+        # TODO: adjust for multiwoz2.1 (now it's just copied over from above)
+        elif (config.data_dir == "data/multiwoz2.1" or config.experiment == "multiwoz2.1"):
+
+            slot_idx = {'attraction': '0:1:2', 'hotel': '3:4:5:6:7:8:9:10:11:12', \
+                        'restaurant': '13:14:15:16:17:18:19', 'taxi': '20:21:22:23', \
+                        'train': '24:25:26:27:28:29'}
+
+            fp_ontology = open(os.path.join(config.data_dir, "ontology.json"), "r")
+            ontology = json.load(fp_ontology)
+            for slot in ontology.keys():
+                ontology[slot].append("none")
+                ontology[slot].append("do not care")
+            fp_ontology.close()
+
+            if not config.target_slot == 'all':
+                target_slot =[]
+                for key, value in slot_idx.items():
+                    if key != config.target_slot:
+                        target_slot.append(value)
+                        config.slot_idx.update({key: value})
+                config.target_slot = ':'.join(target_slot)
+            else:
+                config.slot_idx = slot_idx
 
         else:
             raise NotImplementedError()
@@ -122,8 +151,14 @@ class Processor(DataProcessor):
         ontology = collections.OrderedDict(sorted(ontology.items()))
 
         # select slots to train
-        nslots = len(ontology.keys())
+        all_keys = list(ontology.keys())
+        for key in all_keys:
+            if key.split('-')[0] in ["bus", "hospital"]:
+                del ontology[key]
+            # if key.split('-')[0] == config.exceptd:
+            #     del ontology[key]
         target_slot = list(ontology.keys())
+        nslots = len(ontology.keys())
         if config.target_slot == 'all':
             self.target_slot_idx = [*range(0, nslots)]
         else:
@@ -142,10 +177,18 @@ class Processor(DataProcessor):
         logger.info('Processor: target_slot')
         logger.info(self.target_slot)
 
-    def get_train_examples(self, data_dir, accumulation=False):
+    def get_train_examples(self, data_dir, accumulation=False, except_domain="", few_shot=0):
         """See base class."""
-        return self._create_examples(
-            self._read_tsv(os.path.join(data_dir, "train.tsv")), "train", accumulation)
+        if except_domain != "":
+            if few_shot != 0:
+                return self._create_examples(
+                    self._read_tsv(os.path.join(data_dir, "train-no"+except_domain+"-"+str(few_shot)+"per.tsv")), "train", accumulation)
+            return self._create_examples(
+                self._read_tsv(os.path.join(data_dir, "train-no"+except_domain+".tsv")), "train", accumulation)
+
+        else:
+            return self._create_examples(
+                self._read_tsv(os.path.join(data_dir, "train.tsv")), "train", accumulation)
 
     def get_dev_examples(self, data_dir, accumulation=False):
         """See base class."""
@@ -183,6 +226,7 @@ class Processor(DataProcessor):
             label = [line[4+idx] for idx in self.target_slot_idx]
 
             examples.append(
+                # append domain here?
                 InputExample(guid=guid, text_a=text_a, text_b=text_b, label=label))
         return examples
 
@@ -200,8 +244,8 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
 
     max_turn = 0
     for (ex_index, example) in enumerate(examples):
-        if max_turn < int(example.guid.split('-')[2]):
-            max_turn = int(example.guid.split('-')[2])
+        if max_turn < int(example.guid.split('-')[-1]):
+            max_turn = int(example.guid.split('-')[-1])
     max_turn_length = min(max_turn+1, max_turn_length)
     logger.info("max_turn_length = %d" % max_turn)
 
@@ -254,9 +298,11 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
 
         label_id = []
         label_info = 'label: '
+
         for i, label in enumerate(example.label):
-            if label == 'dontcare':
+            if label == "do n't care":
                 label = 'do not care'
+
             label_id.append(label_map[i][label])
             label_info += '%s (id = %d) ' % (label, label_map[i][label])
 
@@ -270,7 +316,7 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
             logger.info("label: " + label_info)
 
         curr_dialogue_idx = example.guid.split('-')[1]
-        curr_turn_idx = int(example.guid.split('-')[2])
+        curr_turn_idx = int(example.guid.split('-')[-1])
 
         if prev_dialogue_idx is not None and prev_dialogue_idx != curr_dialogue_idx:
             if prev_turn_idx < max_turn_length:
@@ -278,7 +324,9 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
                                            input_len=all_padding_len,
                                            label_id=[-1]*slot_dim)]\
                             *(max_turn_length - prev_turn_idx - 1)
+            #print("len features, max turn len, prev_turn_idx, example.guid", len(features), max_turn_length, prev_turn_idx, example.guid)
             assert len(features) % max_turn_length == 0
+            # if this fails, that means there are more tha 22 turns.
 
         if prev_dialogue_idx is None or prev_turn_idx < max_turn_length:
             features.append(
@@ -359,17 +407,13 @@ def main():
                         type=str,
                         required=True,
                         help="The input data dir. Should contain the .tsv files (or other data files) for the task.")
-    parser.add_argument("--bert_model", default='bert-base-uncased', type=str, required=True,
+    parser.add_argument("--bert_model", default='bert-base-uncased', type=str,
                         help="Bert pre-trained model selected in the list: bert-base-uncased, "
                              "bert-large-uncased, bert-base-cased, bert-large-cased, bert-base-multilingual-uncased, "
                              "bert-base-multilingual-cased, bert-base-chinese.")
-    parser.add_argument("--bert_dir", default='/home/.pytorch_pretrained_bert',
-                        type=str, required=False,
-                        help="The directory of the pretrained BERT model")
     parser.add_argument("--task_name",
-                        default=None,
+                        default="bert-gru-sumbt",
                         type=str,
-                        required=True,
                         help="The name of the task to train: bert-gru-sumbt, bert-lstm-sumbt"
                              "bert-label-embedding, bert-gru-label-embedding, bert-lstm-label-embedding")
     parser.add_argument("--output_dir",
@@ -382,6 +426,23 @@ def main():
                         type=str,
                         required=True,
                         help="Target slot idx to train model. ex. 'all', '0:1:2', or an excluding slot name 'attraction'" )
+    parser.add_argument("--save_inference_results", action='store_true')
+    parser.add_argument("--except_domain",
+                        type=str,
+                        default="",
+                        help="Specify domain to exlude from train")
+    parser.add_argument("--few_shot",
+                        type=int,
+                        default=0,
+                        help="Select from {1, 5, 10} - what percent of zero-shot data to include")
+    parser.add_argument("--target_slot_word",
+                        default='all',
+                        type=str,
+                        help="Target slot idx to train model. ex. 'all', '0:1:2', or an excluding slot name 'attraction'" )
+    parser.add_argument("--slot_idx", type=str, default="")
+    parser.add_argument("--five_domains",
+                        action='store_true',
+                        help="Set this flag if you want to train/evaluate using only 5 domains.")
     parser.add_argument("--tf_dir",
                         default='tensorboard',
                         type=str,
@@ -390,12 +451,10 @@ def main():
     parser.add_argument("--nbt",
                         default='rnn',
                         type=str,
-                        required=True,
                         help="nbt type: rnn or transformer" )
     parser.add_argument("--fix_utterance_encoder",
                         action='store_true',
                         help="Do not train BERT utterance encoder")
-
     ## Other parameters
     parser.add_argument("--max_seq_length",
                         default=64,
@@ -417,7 +476,7 @@ def main():
                              "than this will be padded.")
     parser.add_argument('--hidden_dim',
                         type=int,
-                        default=100,
+                        default=300,
                         help="hidden dimension used in belief tracker")
     parser.add_argument('--num_rnn_layers',
                         type=int,
@@ -444,7 +503,7 @@ def main():
                         default="cosine",
                         help="The metric for distance between label embeddings: cosine, euclidean.")
     parser.add_argument("--train_batch_size",
-                        default=4,
+                        default=3,
                         type=int,
                         help="Total dialog batch size for training.")
     parser.add_argument("--dev_batch_size",
@@ -456,7 +515,7 @@ def main():
                         type=int,
                         help="Total dialog batch size for evaluation.")
     parser.add_argument("--learning_rate",
-                        default=5e-5,
+                        default=1e-4,
                         type=float,
                         help="The initial learning rate for BertAdam.")
     parser.add_argument("--num_train_epochs",
@@ -464,7 +523,7 @@ def main():
                         type=float,
                         help="Total number of training epochs to perform.")
     parser.add_argument("--patience",
-                        default=10.0,
+                        default=15.0,
                         type=float,
                         help="The number of epochs to allow no further improvement.")
     parser.add_argument("--warmup_proportion",
@@ -498,6 +557,10 @@ def main():
     parser.add_argument("--do_not_use_tensorboard",
                         action='store_true',
                         help="Whether to run eval on the test set.")
+    parser.add_argument("--experiment", "-e",
+                        type=str,
+                        default="",
+                        help="multiwoz2.1 or multiwoz2")
 
     args = parser.parse_args()
 
@@ -506,20 +569,20 @@ def main():
         raise ValueError("Output directory ({}) already exists and is not empty.".format(args.output_dir))
     os.makedirs(args.output_dir, exist_ok=True)
 
-    if not args.do_train and not args.do_eval and not args.do_analyze:
+    if not args.do_train and not args.do_eval: #and not args.do_analyze:
         raise ValueError("At least one of `do_train` or `do_eval` must be True.")
 
     # Tensorboard logging
     if not args.do_not_use_tensorboard:
-        tb_file_name = args.output_dir.split('/')[1]
+        tb_file_name = args.output_dir.split('/')[-1]
         summary_writer = SummaryWriter("./%s/%s" % (args.tf_dir, tb_file_name))
+
+        # Logger
+        fileHandler = logging.FileHandler(os.path.join(args.output_dir, "%s.txt" % (tb_file_name)))
+        logger.addHandler(fileHandler)
+        logger.info(args)
     else:
         summary_writer = None
-
-    # Logger
-    fileHandler = logging.FileHandler(os.path.join(args.output_dir, "%s.txt"%(tb_file_name)))
-    logger.addHandler(fileHandler)
-    logger.info(args)
 
     # CUDA setup
     if args.local_rank == -1 or args.no_cuda:
@@ -558,16 +621,18 @@ def main():
     num_labels = [len(labels) for labels in label_list] # number of slot-values in each slot-type
 
     # tokenizer
-    vocab_dir = os.path.join(args.bert_dir, '%s-vocab.txt' % args.bert_model)
-    if not os.path.exists(vocab_dir):
-        raise ValueError("Can't find %s " % vocab_dir)
-    tokenizer = BertTokenizer.from_pretrained(vocab_dir, do_lower_case=args.do_lower_case)
+    # vocab_dir = os.path.join(args.bert_dir, '%s-vocab.txt' % args.bert_model)
+    # if not os.path.exists(vocab_dir):
+    #     raise ValueError("Can't find %s " % vocab_dir)
+    # tokenizer = BertTokenizer.from_pretrained(vocab_dir, do_lower_case=args.do_lower_case)
+
+    tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
 
     num_train_steps = None
     accumulation = False
 
     if args.do_train:
-        train_examples = processor.get_train_examples(args.data_dir, accumulation=accumulation)
+        train_examples = processor.get_train_examples(args.data_dir, accumulation=accumulation, except_domain=args.except_domain, few_shot=args.few_shot)
         dev_examples = processor.get_dev_examples(args.data_dir, accumulation=accumulation)
 
         ## Training utterances
@@ -668,7 +733,10 @@ def main():
 
         if n_gpu == 1:
             optimizer_grouped_parameters = get_optimizer_grouped_parameters(model)
+        elif n_gpu == 0:
+            optimizer_grouped_parameters = get_optimizer_grouped_parameters(model)
         else:
+            # TODO: this is considers multi-gpu but not 0!
             optimizer_grouped_parameters = get_optimizer_grouped_parameters(model.module)
 
         t_total = num_train_steps
@@ -862,7 +930,13 @@ def main():
         model = torch.nn.DataParallel(model)
 
     # in the case that slot and values are different between the training and evaluation
-    ptr_model = torch.load(output_model_file)
+
+    if torch.cuda.is_available():
+        map_location = lambda storage, loc: storage.cuda()
+    else:
+        map_location = 'cpu'
+
+    ptr_model = torch.load(output_model_file, map_location=map_location)
 
     if n_gpu == 1:
         state = model.state_dict()
@@ -870,7 +944,7 @@ def main():
         model.load_state_dict(state)
     else:
         print("Evaluate using only one device!")
-        model.module.load_state_dict(ptr_model)
+        model.load_state_dict(ptr_model)
 
     model.to(device)
 
@@ -878,9 +952,12 @@ def main():
     if args.do_eval and (args.local_rank == -1 or torch.distributed.get_rank() == 0):
 
         eval_examples = processor.get_test_examples(args.data_dir, accumulation=accumulation)
+
         all_input_ids, all_input_len, all_label_ids = convert_examples_to_features(
             eval_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
+
         all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device), all_label_ids.to(device)
+
         logger.info("***** Running evaluation *****")
         logger.info("  Num examples = %d", len(eval_examples))
         logger.info("  Batch size = %d", args.eval_batch_size)
@@ -896,14 +973,22 @@ def main():
         eval_loss_slot, eval_acc_slot = None, None
         nb_eval_steps, nb_eval_examples = 0, 0
 
-        accuracies = {'joint7':0, 'slot7':0, 'joint5':0, 'slot5':0, 'joint_rest':0, 'slot_rest':0,
-                      'num_turn':0, 'num_slot7':0, 'num_slot5':0, 'num_slot_rest':0}
+        accuracies = {'joint':0, 'slot':0, 'num_turn':0, 'num_slot':0,
+                      'joint_restaurant': 0, 'slot_restaurant': 0, 'num_slot_restaurant':0, 'num_turn_restaurant': 0,
+                      'joint_attraction':0, 'slot_attraction':0, 'num_slot_attraction':0, 'num_turn_attraction': 0,
+                      'joint_taxi':0, 'slot_taxi':0, 'num_slot_taxi':0, 'num_turn_taxi': 0,
+                      'joint_train':0, 'slot_train':0, 'num_slot_train':0, 'num_turn_train': 0,
+                      'joint_hotel':0, 'slot_hotel':0, 'num_slot_hotel':0, 'num_turn_hotel': 0}
 
+        results_dict = dict()
+        i=0
         for input_ids, input_len, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
+            print(i)
             if input_ids.dim() == 2:
                 input_ids = input_ids.unsqueeze(0)
                 input_len = input_len.unsqueeze(0)
                 label_ids = label_ids.unsuqeeze(0)
+
 
             with torch.no_grad():
                 if n_gpu == 1:
@@ -914,7 +999,34 @@ def main():
                     nslot = pred_slot.size(3)
                     pred_slot = pred_slot.view(nbatch, -1, nslot)
 
-            accuracies = eval_all_accs(pred_slot, label_ids, accuracies)
+            accuracies = eval_all_accs(pred_slot, label_ids, accuracies, args, device)
+
+            for convo_text, convo_label, pred_label in zip(input_ids, label_ids, pred_slot):
+                if args.save_inference_results:
+                    turn_idx = 0
+                    for turn_lab, turn_pred in zip(convo_label, pred_label):
+                        #print(i,turn)
+                        if (-1 not in turn_lab):
+                            print("eval_examples[i]", eval_examples[i])
+                            _, d_idx, t_idx = eval_examples[i].guid.split('-')
+                            print(d_idx, t_idx, turn_idx)
+                            if d_idx not in results_dict.keys():
+                                results_dict[d_idx] = dict()
+                            results_dict[d_idx][turn_idx] = dict()
+                            label_tokens = [processor.ontology[processor.target_slot[idx]][label] for idx, label in enumerate(turn_lab.cpu().data.numpy())]
+                            pred_tokens = [processor.ontology[processor.target_slot[idx]][label] for idx, label in enumerate(turn_pred.cpu().data.numpy())]
+                            label_tokens_short = [slot_name + '-' + slot_value for slot_name, slot_value in
+                                                  zip(processor.target_slot, label_tokens) if slot_value != "none"]
+                            pred_tokens_short = [slot_name + '-' + slot_value for slot_name, slot_value in
+                                                  zip(processor.target_slot, pred_tokens) if slot_value != "none"]
+                            text = [tokenizer.ids_to_tokens.get(el) for el in convo_text[turn_idx].cpu().data.numpy() if tokenizer.ids_to_tokens.get(el) != '[PAD]']
+                            results_dict[d_idx][turn_idx]["turn_belief"] = label_tokens_short
+                            results_dict[d_idx][turn_idx]["pred_bs_ptr"] = pred_tokens_short
+                            results_dict[d_idx][turn_idx]["text"] = ' '.join(text)
+                            results_dict[d_idx][turn_idx]["text_a"] = eval_examples[i].text_a
+                            results_dict[d_idx][turn_idx]["text_b"] = eval_examples[i].text_b
+                            i+=1
+                        turn_idx += 1
 
             nb_eval_ex = (label_ids[:,:,0].view(-1) != -1).sum().item()
             nb_eval_examples += nb_eval_ex
@@ -968,50 +1080,70 @@ def main():
 
         out_file_name = 'eval_all_accuracies'
         with open(os.path.join(args.output_dir, "%s.txt" % out_file_name), 'w') as f:
-            f.write('joint acc (7 domain) : slot acc (7 domain) : joint acc (5 domain): slot acc (5 domain): joint restaurant : slot acc restaurant \n')
-            f.write('%.5f : %.5f : %.5f : %.5f : %.5f : %.5f \n' % (
-                (accuracies['joint7']/accuracies['num_turn']).item(),
-                (accuracies['slot7']/accuracies['num_slot7']).item(),
-                (accuracies['joint5']/accuracies['num_turn']).item(),
-                (accuracies['slot5'] / accuracies['num_slot5']).item(),
-                (accuracies['joint_rest']/accuracies['num_turn']).item(),
-                (accuracies['slot_rest'] / accuracies['num_slot_rest']).item()
+            f.write('joint acc : slot acc \n')
+            f.write('%.5f : %.5f \n' % (
+                (accuracies['joint']/accuracies['num_turn']).item(),
+                (accuracies['slot']/accuracies['num_slot']).item()
             ))
+            for dom in args.slot_idx.keys():
+                f.write(''. join(('joint ', dom, ': slot acc ', dom,  '\n')))
+                f.write('%.5f : %.5f \n' % (
+                    (accuracies[''.join(('joint_', dom))]/accuracies[''.join(('num_turn_', dom))]).item(),
+                    (accuracies[''.join(('slot_', dom))] / accuracies[''.join(('num_slot_', dom))]).item()
+                ))
+        if args.save_inference_results:
+            with open(os.path.join(args.output_dir, "%s.txt" % "prediction_test.json"), 'w') as f:
+                json.dump(results_dict, f, indent=4, sort_keys=True)
 
-def eval_all_accs(pred_slot, labels, accuracies):
+def eval_all_accs(pred_slot, labels, accuracies, config, device):
+
+    nones = torch.Tensor([7, 143, 17, 14, 7, 10, 9, 3, 83, 4, 4, 7, 2, 5, 10, 8, 56, 102, 189, \
+                          4, 101, 269, 279, 117, 112, 13, 12, 40, 32, 141]).long().to(device)
+
+    missing = torch.Tensor([-1] * 30).long().to(device)
 
     def _eval_acc(_pred_slot, _labels):
+        #print(_pred_slot.shape, _labels.shape)
         slot_dim = _labels.size(-1)
+        existing_turns = _labels[:, :, 0].view(-1) > -1
         accuracy = (_pred_slot == _labels).view(-1, slot_dim)
-        num_turn = torch.sum(_labels[:, :, 0].view(-1) > -1, 0).float()
-        num_data = torch.sum(_labels > -1).float()
-        # joint accuracy
-        joint_acc = sum(torch.sum(accuracy, 1) / slot_dim).float()
-        # slot accuracy
-        slot_acc = torch.sum(accuracy).float()
+        # select only the ones present
+        accuracy_present = accuracy[existing_turns]
+        num_turn = torch.sum(existing_turns, 0).float()
+        num_data = num_turn * slot_dim
+        joint_acc = torch.sum(torch.sum(accuracy_present, 1) / slot_dim).float()
+        slot_acc = torch.sum(accuracy_present).float()
         return joint_acc, slot_acc, num_turn, num_data
 
-    # 7 domains
+    def _domain_in_dialogue(_labels, _slots, skipped):
+        label_slots = [el - skipped for el in _slots]
+        not_missing = (_labels[:, :, label_slots] != missing[_slots]).float()
+        not_none = (_labels[:, :, label_slots] != nones[_slots]).float()
+        return torch.sum(torch.sum(not_missing * not_none, 1), 1) > 0
+
+    # all slots
     joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot, labels)
-    accuracies['joint7'] += joint_acc
-    accuracies['slot7'] += slot_acc
+    accuracies['joint'] += joint_acc
+    accuracies['slot'] += slot_acc
     accuracies['num_turn'] += num_turn
-    accuracies['num_slot7'] += num_data
+    accuracies['num_slot'] += num_data
 
-    # restaurant domain
-    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[:,:,18:25], labels[:,:,18:25])
-    accuracies['joint_rest'] += joint_acc
-    accuracies['slot_rest'] += slot_acc
-    accuracies['num_slot_rest'] += num_data
+    prev_slot = -1
+    skipped = 0
+    for domain_name, slots in config.slot_idx.items():
+        slots = sorted([int(x) for x in slots.split(':')])
+        if prev_slot + 1 != slots[0]:
+            skipped += slots[0] - (prev_slot + 1)
+        print(domain_name, slots)
 
-    pred_slot5 = torch.cat((pred_slot[:,:,0:3], pred_slot[:,:,8:]), 2)
-    label_slot5 = torch.cat((labels[:,:,0:3], labels[:,:,8:]), 2)
+        domain_present = _domain_in_dialogue(labels, slots, skipped)
 
-    # 5 domains (excluding bus and hotel domain)
-    joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot5, label_slot5)
-    accuracies['joint5'] += joint_acc
-    accuracies['slot5'] += slot_acc
-    accuracies['num_slot5'] += num_data
+        joint_acc, slot_acc, num_turn, num_data = _eval_acc(pred_slot[domain_present][:,:,slots], labels[domain_present][:,:,slots])
+        accuracies[''.join(('joint_', domain_name))] += joint_acc
+        accuracies[''.join(('slot_', domain_name))] += slot_acc
+        accuracies[''.join(('num_slot_', domain_name))] += num_data
+        accuracies[''.join(('num_turn_', domain_name))] += num_turn
+        prev_slot = slots[-1]
 
     return accuracies
 
@@ -1027,10 +1159,10 @@ def save_configure(args, num_labels, ontology):
                  "distance_metric": args.distance_metric,
                  "fix_utterance_encoder": args.fix_utterance_encoder,
                  "task_name": args.task_name,
-                 "bert_dir": args.bert_dir,
                  "bert_model": args.bert_model,
                  "do_lower_case": args.do_lower_case,
-                 "ontology": ontology}
+                 "ontology": ontology,
+                 "experiment": args.experiment}
         json.dump(data, outfile, indent=4)
 
 if __name__ == "__main__":

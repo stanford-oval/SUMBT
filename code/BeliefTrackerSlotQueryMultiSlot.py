@@ -92,7 +92,8 @@ class BeliefTracker(nn.Module):
 
         ### Utterance Encoder
         self.utterance_encoder = BertForUtteranceEncoding.from_pretrained(
-            os.path.join(args.bert_dir, 'bert-base-uncased.model')
+            "bert-base-uncased"
+            #os.path.join(args.bert_dir, 'bert-base-uncased.model')
         )
         self.bert_output_dim = self.utterance_encoder.config.hidden_size
         self.hidden_dropout_prob = self.utterance_encoder.config.hidden_dropout_prob
@@ -102,7 +103,8 @@ class BeliefTracker(nn.Module):
 
         ### slot, slot-value Encoder (not trainable)
         self.sv_encoder = BertForUtteranceEncoding.from_pretrained(
-                os.path.join(args.bert_dir, 'bert-base-uncased.model'))
+            "bert-base-uncased")
+                #os.path.join(args.bert_dir, 'bert-base-uncased.model'))
         for p in self.sv_encoder.bert.parameters():
             p.requires_grad = False
 

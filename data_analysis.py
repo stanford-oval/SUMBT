@@ -4,6 +4,7 @@ import json
 import os
 import collections
 import csv
+import argparse
 
 def main():
     parser = argparse.ArgumentParser()
@@ -13,7 +14,7 @@ def main():
     args = parser.parse_args()
 
     ## Parsing ontology
-    if args.args.data_dir == "data/woz":
+    if args.data_dir == "data/woz":
         fp_ontology = open(os.path.join(args.data_dir, "ontology_dstc2_en.json"), "r")
         ontology = json.load(fp_ontology)
         ontology = ontology["informable"]
@@ -34,6 +35,15 @@ def main():
 
     elif args.data_dir == "data/multiwoz":
         fp_ontology = open(os.path.join(args.data_dir, "ontology.json"), "r")
+        ontology = json.load(fp_ontology)
+        for slot in ontology.keys():
+            ontology[slot].append("none")
+        fp_ontology.close()
+
+        ontology = collections.OrderedDict(sorted(ontology.items()))
+        target_slot = list(ontology.keys())
+    elif args.data_dir == "data/multiwoz2.1":
+        fp_ontology = open(os.path.join(args.data_dir, "original/ontology.json"), "r")
         ontology = json.load(fp_ontology)
         for slot in ontology.keys():
             ontology[slot].append("none")
@@ -96,12 +106,14 @@ def main():
 
         writer.close()
 
-    with open(os.path.join(args.data_dir, "none_ratio.txt"), "w", encoding='utf-8') as writer:
-        for i, slot in enumerate(ontology.keys()):
-            val = count_not_none[i]
-            none = count[i]['none']
-            ratio = [ n/(v+n) for v, n in zip(val, none) ]
-            writer.write('%s\t:\t%.6e\t%.6e\t%.6e\n' % (slot, ratio[0], ratio[1], ratio[2]))
+    # with open(os.path.join(args.data_dir, "none_ratio.txt"), "w", encoding='utf-8') as writer:
+    #     for i, slot in enumerate(ontology.keys()):
+    #         val = count_not_none[i]
+    #         none = count[i]['none']
+    #         print(val)
+    #         print(none)
+    #         ratio = [ n/(v+n) for v, n in zip(val, none)]
+    #         writer.write('%s\t:\t%.6e\t%.6e\t%.6e\n' % (slot, ratio[0], ratio[1], ratio[2]))
 
         writer.close()
 
@@ -121,4 +133,5 @@ def main():
             writer.close()
         print(slot_dict)
 
-
+if __name__ == "__main__":
+    main()
