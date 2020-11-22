@@ -49,10 +49,11 @@ class InputExample(object):
 class InputFeatures(object):
     """A single set of features of data."""
 
-    def __init__(self, input_ids, input_len, label_id):
+    def __init__(self, input_ids, input_len, label_id, guid):
         self.input_ids = input_ids
         self.input_len = input_len
         self.label_id = label_id
+        self.guid = guid
 
 
 class DataProcessor(object):
@@ -322,7 +323,8 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
             if prev_turn_idx < max_turn_length:
                 features += [InputFeatures(input_ids=all_padding,
                                            input_len=all_padding_len,
-                                           label_id=[-1]*slot_dim)]\
+                                           label_id=[-1]*slot_dim,
+                                           '')]\
                             *(max_turn_length - prev_turn_idx - 1)
             #print("len features, max turn len, prev_turn_idx, example.guid", len(features), max_turn_length, prev_turn_idx, example.guid)
             assert len(features) % max_turn_length == 0
@@ -332,7 +334,8 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
             features.append(
                 InputFeatures(input_ids=input_ids,
                               input_len=input_len,
-                              label_id=label_id))
+                              label_id=label_id,
+                              example.guid))
 
         prev_dialogue_idx = curr_dialogue_idx
         prev_turn_idx = curr_turn_idx
@@ -347,13 +350,15 @@ def convert_examples_to_features(examples, label_list, max_seq_length, tokenizer
     all_input_ids = torch.tensor([f.input_ids for f in features], dtype=torch.long)
     all_input_len= torch.tensor([f.input_len for f in features], dtype=torch.long)
     all_label_ids = torch.tensor([f.label_id for f in features], dtype=torch.long)
+    guids = torch.tensor([f.guid for f in features], dtype=torch.str)
 
     # reshape tensors to [#batch, #max_turn_length, #max_seq_length]
     all_input_ids = all_input_ids.view(-1, max_turn_length, max_seq_length)
     all_input_len = all_input_len.view(-1, max_turn_length, 2)
     all_label_ids = all_label_ids.view(-1, max_turn_length, slot_dim)
+    all_guids = all_guids.view(-1, max_turn_length)
 
-    return all_input_ids, all_input_len, all_label_ids
+    return all_input_ids, all_input_len, all_label_ids, all_guids
 
 
 def get_label_embedding(labels, max_seq_length, tokenizer, device):
@@ -636,7 +641,7 @@ def main():
         dev_examples = processor.get_dev_examples(args.data_dir, accumulation=accumulation)
 
         ## Training utterances
-        all_input_ids, all_input_len, all_label_ids = convert_examples_to_features(
+        all_input_ids, all_input_len, all_label_ids, _ = convert_examples_to_features(
             train_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
 
         num_train_batches = all_input_ids.size(0)
@@ -658,7 +663,7 @@ def main():
         train_dataloader = DataLoader(train_data, sampler=train_sampler, batch_size=args.train_batch_size)
 
         ## Dev utterances
-        all_input_ids_dev, all_input_len_dev, all_label_ids_dev = convert_examples_to_features(
+        all_input_ids_dev, all_input_len_dev, all_label_ids_dev, _ = convert_examples_to_features(
             dev_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
 
         logger.info("***** Running validation *****")
@@ -953,16 +958,17 @@ def main():
 
         eval_examples = processor.get_test_examples(args.data_dir, accumulation=accumulation)
 
-        all_input_ids, all_input_len, all_label_ids = convert_examples_to_features(
+        all_input_ids, all_input_len, all_label_ids, all_guids = convert_examples_to_features(
             eval_examples, label_list, args.max_seq_length, tokenizer, args.max_turn_length)
 
-        all_input_ids, all_input_len, all_label_ids = all_input_ids.to(device), all_input_len.to(device), all_label_ids.to(device)
+        all_input_ids, all_input_len, all_label_ids, all_guids = \
+            all_input_ids.to(device), all_input_len.to(device), all_label_ids.to(device), all_guids.to(device)
 
         logger.info("***** Running evaluation *****")
         logger.info("  Num examples = %d", len(eval_examples))
         logger.info("  Batch size = %d", args.eval_batch_size)
 
-        eval_data = TensorDataset(all_input_ids, all_input_len, all_label_ids)
+        eval_data = TensorDataset(all_input_ids, all_input_len, all_label_ids, all_guids)
 
         # Run prediction for full data
         eval_sampler = SequentialSampler(eval_data)
@@ -980,10 +986,8 @@ def main():
                       'joint_train':0, 'slot_train':0, 'num_slot_train':0, 'num_turn_train': 0,
                       'joint_hotel':0, 'slot_hotel':0, 'num_slot_hotel':0, 'num_turn_hotel': 0}
 
-        results_dict = dict()
-        i=0
-        for input_ids, input_len, label_ids in tqdm(eval_dataloader, desc="Evaluating"):
-            print(i)
+        results_dict = collections.defaultdict(dict)
+        for input_ids, input_len, label_ids, input_guids in tqdm(eval_dataloader, desc="Evaluating"):
             if input_ids.dim() == 2:
                 input_ids = input_ids.unsqueeze(0)
                 input_len = input_len.unsqueeze(0)
@@ -1001,32 +1005,22 @@ def main():
 
             accuracies = eval_all_accs(pred_slot, label_ids, accuracies, args, device)
 
-            for convo_text, convo_label, pred_label in zip(input_ids, label_ids, pred_slot):
-                if args.save_inference_results:
-                    turn_idx = 0
-                    for turn_lab, turn_pred in zip(convo_label, pred_label):
-                        #print(i,turn)
-                        if (-1 not in turn_lab):
-                            print("eval_examples[i]", eval_examples[i])
-                            _, d_idx, t_idx = eval_examples[i].guid.split('-')
-                            print(d_idx, t_idx, turn_idx)
-                            if d_idx not in results_dict.keys():
-                                results_dict[d_idx] = dict()
-                            results_dict[d_idx][turn_idx] = dict()
-                            label_tokens = [processor.ontology[processor.target_slot[idx]][label] for idx, label in enumerate(turn_lab.cpu().data.numpy())]
-                            pred_tokens = [processor.ontology[processor.target_slot[idx]][label] for idx, label in enumerate(turn_pred.cpu().data.numpy())]
-                            label_tokens_short = [slot_name + '-' + slot_value for slot_name, slot_value in
-                                                  zip(processor.target_slot, label_tokens) if slot_value != "none"]
-                            pred_tokens_short = [slot_name + '-' + slot_value for slot_name, slot_value in
-                                                  zip(processor.target_slot, pred_tokens) if slot_value != "none"]
-                            text = [tokenizer.ids_to_tokens.get(el) for el in convo_text[turn_idx].cpu().data.numpy() if tokenizer.ids_to_tokens.get(el) != '[PAD]']
-                            results_dict[d_idx][turn_idx]["turn_belief"] = label_tokens_short
-                            results_dict[d_idx][turn_idx]["pred_bs_ptr"] = pred_tokens_short
-                            results_dict[d_idx][turn_idx]["text"] = ' '.join(text)
-                            results_dict[d_idx][turn_idx]["text_a"] = eval_examples[i].text_a
-                            results_dict[d_idx][turn_idx]["text_b"] = eval_examples[i].text_b
-                            i+=1
-                        turn_idx += 1
+            if args.save_inference_results:
+                for convo_text, convo_label, pred_label, convo_guid in zip(input_ids, label_ids, pred_slot, input_guids):
+                    for turn_lab, turn_pred, turn_guid in zip(convo_label, pred_label, convo_guid):
+                        _, d_idx, t_idx = turn_guid.item().split('-')
+                        turn_dict = dict()
+                        results_dict[d_idx][t_idx] = turn_dict
+                        label_tokens = [processor.ontology[processor.target_slot[idx]][label] for idx, label in enumerate(turn_lab.cpu().data.numpy())]
+                        pred_tokens = [processor.ontology[processor.target_slot[idx]][label] for idx, label in enumerate(turn_pred.cpu().data.numpy())]
+                        label_tokens_short = [slot_name + '-' + slot_value for slot_name, slot_value in
+                                              zip(processor.target_slot, label_tokens) if slot_value != "none"]
+                        pred_tokens_short = [slot_name + '-' + slot_value for slot_name, slot_value in
+                                              zip(processor.target_slot, pred_tokens) if slot_value != "none"]
+                        text = [tokenizer.ids_to_tokens.get(el) for el in convo_text[turn_idx].cpu().data.numpy() if tokenizer.ids_to_tokens.get(el) != '[PAD]']
+                        turn_dict["turn_belief"] = label_tokens_short
+                        turn_dict["pred_bs_ptr"] = pred_tokens_short
+                        turn_dict["text"] = ' '.join(text)
 
             nb_eval_ex = (label_ids[:,:,0].view(-1) != -1).sum().item()
             nb_eval_examples += nb_eval_ex
